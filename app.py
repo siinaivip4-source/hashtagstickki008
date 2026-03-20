@@ -33,7 +33,7 @@ def init_firebase():
             key_dict = json.loads(st.secrets["firebase_json"])
             cred = credentials.Certificate(key_dict)
             firebase_admin.initialize_app(cred)
-        except Exception as e:
+        except Exception:
             st.error("⚠️ Lỗi cấu hình Firebase Secrets!")
             st.stop()
     return firestore.client()
@@ -73,7 +73,26 @@ def check_license_key():
 
 check_license_key()
 
-# ===== 1. CONSTANTS & HIERARCHY (Khôi phục 100%) =====
+# ===== 1. CSS HACK: XANH HÓA TẤT CẢ BUTTON HÀNH ĐỘNG =====
+st.markdown("""
+    <style>
+    /* Nút Primary và Nút Download chuyển sang xanh lá */
+    div.stButton > button[kind="primary"], 
+    div.stDownloadButton > button {
+        background-color: #28a745 !important;
+        color: white !important;
+        border-color: #28a745 !important;
+        width: 100%;
+    }
+    div.stButton > button[kind="primary"]:hover, 
+    div.stDownloadButton > button:hover {
+        background-color: #218838 !important;
+        border-color: #1e7e34 !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ===== 2. DATA HIERARCHY (Duy trì chuẩn cũ) =====
 OBJECT_HIERARCHY = {
     'Action': {'Communicate': ['Talk', 'Shakehead', 'Shakehand', 'Think', 'Shout', 'Tease', 'Sing', 'Refuse', 'Agree'],
                'Lifeaction': ['Eat', 'Sleep', 'Wakeup', 'Cook', 'Study', 'Work', 'Relax'],
@@ -119,7 +138,7 @@ def get_flat_options(root_key):
 ACTION_OPTIONS = get_flat_options('Action')
 EMOTION_OPTIONS = get_flat_options('Emotion')
 
-# ===== 2. AI MODEL & UTILS =====
+# ===== 3. AI MODEL & UTILS =====
 MODEL_ID = "openai/clip-vit-large-patch14"
 
 @st.cache_resource(show_spinner="Loading AI Model...")
@@ -129,7 +148,7 @@ def load_clip_model():
         processor = CLIPProcessor.from_pretrained(MODEL_ID)
         model = CLIPModel.from_pretrained(MODEL_ID).to(device)
         return processor, model, device
-    except: return None, None, "cpu"
+    except Exception: return None, None, "cpu"
 
 @st.cache_data
 def get_separated_vocabularies():
@@ -175,11 +194,25 @@ def get_object_hierarchy_path(leaf):
             if leaf in l3_list: return l1, l2, leaf
     return "None", None, None
 
-def render_base64_img(bytes_data):
+def render_base64_img(bytes_data, file_name):
     b64 = base64.b64encode(bytes_data).decode("utf-8")
-    st.markdown(f'<img src="data:image/png;base64,{b64}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
+    ext = file_name.split('.')[-1].lower()
+    mime = "image/webp" if ext == "webp" else ("image/gif" if ext == "gif" else f"image/{ext}")
+    st.markdown(f'<img src="data:{mime};base64,{b64}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
 
-# ===== 3. MAIN UI =====
+@st.dialog("🖼️ Xem toàn bộ thư mục")
+def show_preview_zip(zip_buffer, files_to_show):
+    st.markdown(f"**Hiển thị {len(files_to_show)} tệp trong thư mục**")
+    cols = st.columns(4)
+    with zipfile.ZipFile(zip_buffer) as z_dialog:
+        for i, f_path in enumerate(files_to_show):
+            with z_dialog.open(f_path) as f:
+                img_bytes_dialog = f.read()
+                with cols[i % 4]:
+                    st.caption(os.path.basename(f_path))
+                    render_base64_img(img_bytes_dialog, f_path)
+
+# ===== 4. MAIN UI =====
 st.title("🔥 AI Pro Multi-Folder ZIP Hashtag Generator")
 st.markdown(f"👤 **User:** `{st.session_state.get('user_name')}` | 🛠️ **Mode:** Batch ZIP (Web Optimized)")
 
@@ -192,65 +225,53 @@ with st.sidebar:
     st.session_state['ai_model'] = (proc, mod, dev)
     st.success(f"AI: **{dev.upper()}**")
 
-# --- STEP 1: UPLOAD & PROCESS ZIP ---
 zip_file = st.file_uploader("Upload file .ZIP chứa các Folder Sticker:", type=["zip"])
 
 if zip_file:
-    with zipfile.ZipFile(zip_file) as z:
+    zip_bytes_io = io.BytesIO(zip_file.getvalue())
+    with zipfile.ZipFile(zip_bytes_io) as z:
         valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
-        # Lọc và Sắp xếp tự nhiên ngay từ đầu
         all_files = sorted([m for m in z.namelist() if m.lower().endswith(valid_exts) and not m.startswith('__MACOSX')], key=natural_keys)
-        
         groups = {}
         for f in all_files:
             folder = os.path.dirname(f) or "Root"
             if folder not in groups: groups[folder] = []
             groups[folder].append(f)
-            
         st.success(f"📦 Tìm thấy {len(groups)} Folders và {len(all_files)} tệp.")
 
-        # --- STEP 2: DYNAMIC CONFIGURATION (Logic cũ 100%) ---
         folder_configs = {}
-        
         for f_name, f_files in groups.items():
             with st.expander(f"📂 Thư mục: {f_name} ({len(f_files)} stickers)", expanded=False):
                 col_img, col_cfg = st.columns([1, 4])
-                
                 with z.open(f_files[0]) as first:
                     img_bytes = first.read()
                     with col_img:
-                        render_base64_img(img_bytes)
-                
+                        render_base64_img(img_bytes, f_files[0])
+                        if st.button(f"👁️ View All", key=f"btn_{f_name}", use_container_width=True):
+                            show_preview_zip(zip_bytes_io, f_files)
                 with col_cfg:
-                    # AI soi dự đoán
                     s_obj, s_act, s_emo, s_s1, s_s2 = get_ai_prediction_from_bytes(img_bytes)
                     def_l1, def_l2, def_l3 = get_object_hierarchy_path(s_obj)
-                    
                     c1, c2, c3 = st.columns(3)
                     with c1:
                         st.caption("🎯 Object Hierarchy")
                         idx_l1 = OBJECT_L1_OPTIONS.index(def_l1) if def_l1 in OBJECT_L1_OPTIONS else 0
                         sel_l1 = st.selectbox("L1 Category", OBJECT_L1_OPTIONS, index=idx_l1, key=f"l1_{f_name}")
-                        
                         l2_opts = ["None"] + list(OBJECT_HIERARCHY[sel_l1].keys()) if sel_l1 != "None" else ["None"]
                         idx_l2 = l2_opts.index(def_l2) if (def_l2 in l2_opts) else 0
                         sel_l2 = st.selectbox("L2 Subject", l2_opts, index=idx_l2, key=f"l2_{f_name}")
-                        
                         l3_opts = ["None"] + OBJECT_HIERARCHY[sel_l1][sel_l2] if (sel_l1 != "None" and sel_l2 != "None") else ["None"]
                         if len(l3_opts) > 1:
                             idx_l3 = l3_opts.index(def_l3) if (def_l3 in l3_opts) else 0
                             sel_l3 = st.selectbox("L3 Detail", l3_opts, index=idx_l3, key=f"l3_{f_name}")
                         else: sel_l3 = "None"
-                        
                         final_obj = sel_l3 if sel_l3 != "None" else (sel_l2 if sel_l2 != "None" else sel_l1)
-
                     with c2:
                         st.caption("🎭 Action & Emotion")
                         idx_act = ACTION_OPTIONS.index(s_act) if s_act in ACTION_OPTIONS else 0
                         sel_act = st.selectbox("Action", ACTION_OPTIONS, index=idx_act, key=f"act_{f_name}")
                         idx_emo = EMOTION_OPTIONS.index(s_emo) if s_emo in EMOTION_OPTIONS else 0
                         sel_emo = st.selectbox("Emotion", EMOTION_OPTIONS, index=idx_emo, key=f"emo_{f_name}")
-
                     with c3:
                         st.caption("🎨 Styles")
                         idx_s1 = STYLES.index(s_s1) if s_s1 in STYLES else 0
@@ -258,14 +279,13 @@ if zip_file:
                         s2_opts = [s for s in STYLES if s != sel_s1 or s == "None"]
                         idx_s2 = s2_opts.index(s_s2) if s_s2 in s2_opts else 0
                         sel_s2 = st.selectbox("Style 2", s2_opts, index=idx_s2, key=f"s2_{f_name}")
-                    
                     folder_configs[f_name] = {
                         "obj": final_obj, "act": sel_act, "emo": sel_emo, 
                         "s1": sel_s1, "s2": sel_s2, "files": f_files
                     }
 
-        # --- STEP 3: EXPORT ---
         st.divider()
+        # Nút Export chuyển sang màu xanh lá nhờ CSS
         if st.button("🚀 Export All Folders to CSV", type="primary", use_container_width=True):
             results = []
             for f_name, cfg in folder_configs.items():
@@ -273,16 +293,28 @@ if zip_file:
                 for file_path in cfg["files"]:
                     fname = os.path.basename(file_path)
                     m_type = "Gif" if fname.lower().endswith('gif') else "Image"
-                    
                     tags = [folder_hashtag, cfg["obj"], cfg["act"], cfg["emo"], m_type, cfg["s1"], cfg["s2"]]
                     hashtag_str = " ".join([f"#{t}" for t in tags if t and t != "None"])
                     
+                    # QUAN TRỌNG: Khôi phục Style 2 vào dataframe kết quả
                     results.append({
-                        "Folder": f_name, "File Name": fname, "Object": cfg["obj"],
-                        "Action": cfg["act"], "Emotion": cfg["emo"], "Style1": cfg["s1"],
+                        "Folder": f_name, 
+                        "File Name": fname, 
+                        "Object": cfg["obj"] if cfg["obj"] != "None" else "",
+                        "Action": cfg["act"] if cfg["act"] != "None" else "",
+                        "Emotion": cfg["emo"] if cfg["emo"] != "None" else "",
+                        "Style1": cfg["s1"] if cfg["s1"] != "None" else "",
+                        "Style2": cfg["s2"] if cfg["s2"] != "None" else "",
                         "Hashtags": hashtag_str
                     })
             
             df = pd.DataFrame(results)
             st.dataframe(df, use_container_width=True)
-            st.download_button("📥 Download Final CSV", df.to_csv(index=False).encode('utf-8-sig'), "hashtags_batch.csv", "text/csv", type="primary")
+            # Nút Download cũng sẽ có màu xanh lá
+            st.download_button(
+                label="📥 Download Final CSV",
+                data=df.to_csv(index=False).encode('utf-8-sig'),
+                file_name="hashtags_batch.csv",
+                mime="text/csv",
+                type="primary"
+            )
