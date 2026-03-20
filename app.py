@@ -22,11 +22,8 @@ st.set_page_config(
 )
 
 # ===== 0. HỆ THỐNG BẢO MẬT (FIREBASE + COOKIE) =====
-@st.cache_resource
-def get_cookie_manager():
-    return stx.CookieManager()
-
-cookie_manager = get_cookie_manager()
+# Khởi tạo trực tiếp, không dùng cache vì CookieManager chứa widget bên trong
+cookie_manager = stx.CookieManager()
 
 @st.cache_resource
 def init_firebase():
