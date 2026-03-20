@@ -73,10 +73,9 @@ def check_license_key():
 
 check_license_key()
 
-# ===== 1. CSS HACK: XANH HÓA TẤT CẢ BUTTON HÀNH ĐỘNG =====
+# ===== 1. CSS HACK: XANH HÓA TẤT CẢ ACTION BUTTONS =====
 st.markdown("""
     <style>
-    /* Nút Primary và Nút Download chuyển sang xanh lá */
     div.stButton > button[kind="primary"], 
     div.stDownloadButton > button {
         background-color: #28a745 !important;
@@ -92,7 +91,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ===== 2. DATA HIERARCHY (Duy trì chuẩn cũ) =====
+# ===== 2. DATA HIERARCHY & UTILS =====
 OBJECT_HIERARCHY = {
     'Action': {'Communicate': ['Talk', 'Shakehead', 'Shakehand', 'Think', 'Shout', 'Tease', 'Sing', 'Refuse', 'Agree'],
                'Lifeaction': ['Eat', 'Sleep', 'Wakeup', 'Cook', 'Study', 'Work', 'Relax'],
@@ -138,7 +137,27 @@ def get_flat_options(root_key):
 ACTION_OPTIONS = get_flat_options('Action')
 EMOTION_OPTIONS = get_flat_options('Emotion')
 
-# ===== 3. AI MODEL & UTILS =====
+# --- Helper Functions ---
+def natural_keys(text):
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+
+def detect_type_from_bytes(img_bytes, file_name):
+    """Xác nhận định dạng Gif hay Image từ dữ liệu Bytes"""
+    ext = file_name.lower().split('.')[-1]
+    if ext == 'gif': return 'Gif'
+    try:
+        img = PILImage.open(io.BytesIO(img_bytes))
+        if getattr(img, "is_animated", False): return 'Gif'
+    except: pass
+    return 'Image'
+
+def render_base64_img(bytes_data, file_name):
+    b64 = base64.b64encode(bytes_data).decode("utf-8")
+    ext = file_name.split('.')[-1].lower()
+    mime = "image/webp" if ext == "webp" else ("image/gif" if ext == "gif" else f"image/{ext}")
+    st.markdown(f'<img src="data:{mime};base64,{b64}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
+
+# ===== 3. AI MODEL SETUP =====
 MODEL_ID = "openai/clip-vit-large-patch14"
 
 @st.cache_resource(show_spinner="Loading AI Model...")
@@ -158,9 +177,6 @@ def get_separated_vocabularies():
             if not l3_list: obj_labels.append(l2_key)
             else: obj_labels.extend(l3_list)
     return sorted(list(set(obj_labels))), sorted([a for a in ACTION_OPTIONS if a != "None"]), sorted([e for e in EMOTION_OPTIONS if e != "None"])
-
-def natural_keys(text):
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
 
 def run_classification(image, labels, processor, model, device):
     inputs = processor(text=labels, images=image, return_tensors="pt", padding=True).to(device)
@@ -194,12 +210,7 @@ def get_object_hierarchy_path(leaf):
             if leaf in l3_list: return l1, l2, leaf
     return "None", None, None
 
-def render_base64_img(bytes_data, file_name):
-    b64 = base64.b64encode(bytes_data).decode("utf-8")
-    ext = file_name.split('.')[-1].lower()
-    mime = "image/webp" if ext == "webp" else ("image/gif" if ext == "gif" else f"image/{ext}")
-    st.markdown(f'<img src="data:{mime};base64,{b64}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
-
+# --- UI Dialog ---
 @st.dialog("🖼️ Xem toàn bộ thư mục")
 def show_preview_zip(zip_buffer, files_to_show):
     st.markdown(f"**Hiển thị {len(files_to_show)} tệp trong thư mục**")
@@ -285,36 +296,40 @@ if zip_file:
                     }
 
         st.divider()
-        # Nút Export chuyển sang màu xanh lá nhờ CSS
         if st.button("🚀 Export All Folders to CSV", type="primary", use_container_width=True):
             results = []
-            for f_name, cfg in folder_configs.items():
-                folder_hashtag = f_name.split('/')[-1].replace(" ", "")
-                for file_path in cfg["files"]:
-                    fname = os.path.basename(file_path)
-                    m_type = "Gif" if fname.lower().endswith('gif') else "Image"
-                    tags = [folder_hashtag, cfg["obj"], cfg["act"], cfg["emo"], m_type, cfg["s1"], cfg["s2"]]
-                    hashtag_str = " ".join([f"#{t}" for t in tags if t and t != "None"])
-                    
-                    # QUAN TRỌNG: Khôi phục Style 2 vào dataframe kết quả
-                    results.append({
-                        "Folder": f_name, 
-                        "File Name": fname, 
-                        "Object": cfg["obj"] if cfg["obj"] != "None" else "",
-                        "Action": cfg["act"] if cfg["act"] != "None" else "",
-                        "Emotion": cfg["emo"] if cfg["emo"] != "None" else "",
-                        "Style1": cfg["s1"] if cfg["s1"] != "None" else "",
-                        "Style2": cfg["s2"] if cfg["s2"] != "None" else "",
-                        "Hashtags": hashtag_str
-                    })
+            # Mở lại zip để kiểm tra định dạng từng tệp khi xuất
+            with zipfile.ZipFile(zip_bytes_io) as z_final:
+                for f_name, cfg in folder_configs.items():
+                    folder_hashtag = f_name.split('/')[-1].replace(" ", "")
+                    for file_path in cfg["files"]:
+                        with z_final.open(file_path) as current_f:
+                            file_bytes = current_f.read()
+                            
+                        fname = os.path.basename(file_path)
+                        # ĐỊNH DẠNG ĐÃ TRỞ LẠI:
+                        m_type = detect_type_from_bytes(file_bytes, fname)
+                        
+                        tags = [folder_hashtag, cfg["obj"], cfg["act"], cfg["emo"], m_type, cfg["s1"], cfg["s2"]]
+                        hashtag_str = " ".join([f"#{t}" for t in tags if t and t != "None"])
+                        
+                        results.append({
+                            "Folder": f_name, 
+                            "File Name": fname, 
+                            "Object": cfg["obj"] if cfg["obj"] != "None" else "",
+                            "Action": cfg["act"] if cfg["act"] != "None" else "",
+                            "Emotion": cfg["emo"] if cfg["emo"] != "None" else "",
+                            "Type": m_type,
+                            "Style1": cfg["s1"] if cfg["s1"] != "None" else "",
+                            "Style2": cfg["s2"] if cfg["s2"] != "None" else "",
+                            "Hashtags": hashtag_str
+                        })
             
             df = pd.DataFrame(results)
             st.dataframe(df, use_container_width=True)
-            # Nút Download cũng sẽ có màu xanh lá
             st.download_button(
                 label="📥 Download Final CSV",
                 data=df.to_csv(index=False).encode('utf-8-sig'),
-                file_name="hashtags_batch.csv",
-                mime="text/csv",
-                type="primary"
+                file_name="hashtags_batch_full.csv",
+                mime="text/csv"
             )
