@@ -1,6 +1,7 @@
 streamlit
 pandas
 Pillow
-transformers==4.38.2
+transformers
 torch
-torchvision
+extra-streamlit-components
+firebase-admin
