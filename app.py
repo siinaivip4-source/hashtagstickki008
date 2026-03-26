@@ -38,7 +38,7 @@ authenticator = Authenticate(
     cookie_name='ai_pro_hashtag_cookie',
     cookie_key='chuoi_ma_hoa_bi_mat_cua_cau',
     # QUAN TRỌNG: Sửa link dưới đây thành link app Streamlit thật của cậu
-    redirect_uri='https://hashtagstickki008.streamlit.app/', 
+    redirect_uri='https://hashtagstickki008.streamlit.app', 
 )
 
 # ... (Giữ nguyên phần code Firebase và phần Lõi ở dưới) ...
