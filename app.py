@@ -16,24 +16,25 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ===== 1. HỆ THỐNG ĐĂNG NHẬP NỘI BỘ =====
+# ===== 1. HỆ THỐNG ĐĂNG NHẬP NỘI BỘ (Thay thế Firebase) =====
 def check_password():
-    """Returns `True` if the user had the correct password."""
+    """Trả về True nếu người dùng nhập đúng thông tin trong st.secrets."""
 
     def password_entered():
-        """Checks whether a password entered by the user is correct."""
+        """Kiểm tra thông tin đăng nhập."""
         if (
             st.session_state["username"] in st.secrets["passwords"]
             and st.session_state["password"]
             == st.secrets["passwords"][st.session_state["username"]]
         ):
             st.session_state["password_correct"] = True
+            st.session_state["user_name"] = st.session_state["username"] # Lưu tên hiển thị
             del st.session_state["password"]  # Xóa pass khỏi session cho an toàn
         else:
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # Lần đầu chạy, hiển thị form đăng nhập
+        # Hiển thị form đăng nhập lần đầu
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.markdown("<h2 style='text-align: center;'>🔒 CỬU VÂN SƠN - HỆ THỐNG NỘI BỘ</h2>", unsafe_allow_html=True)
@@ -43,7 +44,7 @@ def check_password():
         return False
         
     elif not st.session_state["password_correct"]:
-        # Nhập sai mật khẩu
+        # Nhập sai thông tin
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.markdown("<h2 style='text-align: center;'>🔒 CỬU VÂN SƠN - HỆ THỐNG NỘI BỘ</h2>", unsafe_allow_html=True)
@@ -54,19 +55,20 @@ def check_password():
         return False
         
     else:
-        # Nhập đúng, cho phép đi tiếp
+        # Đã đăng nhập thành công
         return True
 
-# KIỂM TRA ĐĂNG NHẬP NGAY TẠI ĐÂY
+# Kiểm tra đăng nhập
 if not check_password():
-    st.stop()  # Cắt luồng chạy nếu chưa login
+    st.stop()
 
 # =========================================================================
-# 2. TỪ ĐÂY TRỞ XUỐNG LÀ LÕI TOOL CHÍNH (Chỉ chạy khi đã login)
+# LÕI TOOL CHÍNH (Chỉ chạy khi đăng nhập thành công)
 # =========================================================================
 
-user_name = st.session_state.get("username", "Admin")
+user_name = st.session_state.get("user_name", "Thành viên")
 
+# Tùy chỉnh CSS cho nút bấm
 st.markdown("""
     <style>
     div.stButton > button[kind="primary"] {
@@ -81,6 +83,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- Các danh mục và từ điển (Giữ nguyên từ bản cũ) ---
 TYPES = ['Gif', 'Image']
 STYLES = ['None', 'Meme', 'Funny', 'Cute', 'Hot', 'Slay', 'Lowkey', 'Highkey', 'Savage', '2D', '3D', 'Anime', 'Romance', 'Cool']
 
@@ -129,9 +132,10 @@ def get_flat_options(root_key):
 ACTION_OPTIONS = get_flat_options('Action')
 EMOTION_OPTIONS = get_flat_options('Emotion')
 
+# --- Các hàm AI CLIP (Giữ nguyên) ---
 MODEL_ID = "openai/clip-vit-large-patch14"
 
-@st.cache_resource(show_spinner=f"Loading Heavy AI Model ({MODEL_ID}) into GPU/CPU... Please wait.")
+@st.cache_resource(show_spinner=f"Loading AI Model ({MODEL_ID})...")
 def load_clip_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
@@ -148,7 +152,6 @@ def get_separated_vocabularies():
         for l2_key, l3_list in OBJECT_HIERARCHY[l1].items():
             if not l3_list: obj_labels.append(l2_key)
             else: obj_labels.extend(l3_list)
-    if not obj_labels: obj_labels.append("Other")
     return sorted(list(set(obj_labels))), sorted([a for a in ACTION_OPTIONS if a != "None"]), sorted([e for e in EMOTION_OPTIONS if e != "None"])
 
 @st.cache_data
@@ -195,7 +198,6 @@ def run_style_classification(file_path, styles_list, processor, model, device):
         with torch.no_grad():
             outputs = model(**inputs)
             probs = outputs.logits_per_image.softmax(dim=1)[0]
-        
         top2_idx = torch.topk(probs, 2).indices.tolist()
         return valid_styles[top2_idx[0]], valid_styles[top2_idx[1]]
     except Exception:
@@ -205,22 +207,18 @@ def run_style_classification(file_path, styles_list, processor, model, device):
 def get_cached_ai_predictions(file_path):
     processor, model, device = st.session_state['ai_model']
     if not processor: return "None", "None", "None", "Image", "None", "None"
-    
     vocabs = {'Object': st.session_state['v_obj'], 'Action': st.session_state['v_act'], 'Emotion': st.session_state['v_emo']}
     s_obj, s_act, s_emo = run_triple_classification(file_path, vocabs, processor, model, device)
     s_type = detect_media_type_local(file_path)
     s_style1, s_style2 = run_style_classification(file_path, STYLES, processor, model, device)
-    
     return s_obj, s_act, s_emo, s_type, s_style1, s_style2
 
 def get_object_hierarchy_path(leaf_node):
     if leaf_node == "Other" or leaf_node == "None": return "None", None, None
     for l1 in [k for k in OBJECT_L1_OPTIONS if k != "None"]:
         for l2, l3_list in OBJECT_HIERARCHY[l1].items():
-            if not l3_list and leaf_node == l2:
-                return l1, l2, None
-            if leaf_node in l3_list:
-                return l1, l2, leaf_node
+            if not l3_list and leaf_node == l2: return l1, l2, None
+            if leaf_node in l3_list: return l1, l2, leaf_node
     return "None", None, None
 
 @st.dialog("🖼️ Full Folder Preview")
@@ -239,15 +237,12 @@ def show_folder_images_dialog(folder_name, file_paths):
         except Exception:
             cols[i % 4].write("*(Format error)*")
 
+# --- UI CHÍNH ---
 st.title("🔥 AI Pro Batch Hashtag Generator")
-st.markdown(f"**👤 Đang sử dụng bởi: `{user_name}`** | Powered by `ViT-Large-Patch14`.")
+st.markdown(f"**👤 Đang sử dụng: `{user_name}`**")
 
 with st.sidebar:
-    st.subheader("Bảng Điều Khiển")
-    if st.button("🔄 Làm Mới Hệ Thống", use_container_width=True):
-        st.rerun()
-        
-    if st.button("🚪 Đăng xuất", use_container_width=True):
+    if st.button("🚪 Đăng Xuất", use_container_width=True):
         st.session_state["password_correct"] = False
         st.rerun()
         
@@ -255,11 +250,7 @@ with st.sidebar:
     st.subheader("System Status")
     processor, model, device = load_clip_model()
     if processor and model:
-        if device == "cuda":
-            st.success(f"🚀 AI Loaded on: **GPU (CUDA)**")
-        else:
-            st.warning(f"⚠️ AI Loaded on: **CPU**")
-            
+        st.success(f"🚀 AI Loaded on: **{device.upper()}**")
         st.session_state['ai_model'] = (processor, model, device)
         v_obj, v_act, v_emo = get_separated_vocabularies()
         st.session_state['v_obj'] = v_obj
@@ -267,7 +258,6 @@ with st.sidebar:
         st.session_state['v_emo'] = v_emo
     else:
         st.error("AI Model failed to load.")
-        st.session_state['ai_model'] = (None, None, "cpu")
 
 st.subheader("1. AI Folder Configuration")
 root_dir = st.text_input("Parent Directory Path (e.g., D:\\My_Stickers):")
@@ -278,13 +268,10 @@ folder_configs = {}
 if root_dir and os.path.isdir(root_dir):
     subdirs = sorted([f.path for f in os.scandir(root_dir) if f.is_dir()], key=lambda x: natural_keys(os.path.basename(x)))
     if not subdirs: subdirs = [root_dir] 
-        
-    st.success(f"Detected {len(subdirs)} folder(s). Generating AI predictions...")
     
     for folder_path in subdirs:
         valid_files = [f for f in os.listdir(folder_path) if f.lower().endswith(VALID_EXTENSIONS)]
         valid_files.sort(key=natural_keys) 
-        
         if valid_files:
             folder_name = os.path.basename(folder_path)
             folders_to_process[folder_name] = [os.path.join(folder_path, f) for f in valid_files]
@@ -292,139 +279,58 @@ if root_dir and os.path.isdir(root_dir):
             
             with st.container(border=True):
                 col_img, col_cfg = st.columns([1, 4])
-                
                 with col_img:
                     try:
                         with open(first_img_path, "rb") as f:
                             b64_first = base64.b64encode(f.read()).decode("utf-8")
                         first_ext = first_img_path.split('.')[-1].lower()
                         first_mime = "image/webp" if first_ext == "webp" else ("image/gif" if first_ext == "gif" else f"image/{first_ext}")
-                        
                         st.markdown(f'<img src="data:{first_mime};base64,{b64_first}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
-                    except Exception as e:
-                        st.write("*(Preview error)*")
-                        
-                    if st.button(f"👁️ View All ({len(valid_files)})", key=f"btn_{folder_name}", use_container_width=True):
+                    except: st.write("*(Preview error)*")
+                    if st.button(f"👁️ View All ({len(valid_files)})", key=f"btn_{folder_name}"):
                         show_folder_images_dialog(folder_name, folders_to_process[folder_name])
-                        
+                
                 with col_cfg:
                     st.markdown(f"**📂 Folder: {folder_name}**")
-                    
                     s_obj, s_act, s_emo, s_type, s_s1, s_s2 = get_cached_ai_predictions(first_img_path)
                     def_l1, def_l2, def_l3 = get_object_hierarchy_path(s_obj)
                     
                     cfg1, cfg2, cfg3 = st.columns(3)
-                    
                     with cfg1:
-                        st.caption("🎯 Object Hierarchy")
+                        st.caption("🎯 Object")
                         idx_l1 = OBJECT_L1_OPTIONS.index(def_l1) if def_l1 in OBJECT_L1_OPTIONS else 0
-                        sel_l1 = st.selectbox("L1 (Category)", options=OBJECT_L1_OPTIONS, index=idx_l1, key=f"l1_{folder_name}")
-                        
-                        if sel_l1 and sel_l1 != "None":
-                            l2_opts = ["None"] + list(OBJECT_HIERARCHY[sel_l1].keys())
-                            idx_l2 = l2_opts.index(def_l2) if def_l2 in l2_opts else 0
-                            sel_l2 = st.selectbox("L2 (Subject)", options=l2_opts, index=idx_l2, key=f"l2_{folder_name}")
-                            
-                            if sel_l2 and sel_l2 != "None":
-                                l3_opts = ["None"] + OBJECT_HIERARCHY[sel_l1][sel_l2] if OBJECT_HIERARCHY[sel_l1][sel_l2] else []
-                                if len(l3_opts) > 1:
-                                    idx_l3 = l3_opts.index(def_l3) if def_l3 in l3_opts else 0
-                                    sel_l3 = st.selectbox("L3 (Detail)", options=l3_opts, index=idx_l3, key=f"l3_{folder_name}")
-                                else:
-                                    sel_l3 = None
-                            else:
-                                sel_l3 = None
-                        else:
-                            sel_l2 = "None"
-                            sel_l3 = None
-                            
-                        final_obj = sel_l3 if sel_l3 and sel_l3 != "None" else (sel_l2 if sel_l2 and sel_l2 != "None" else sel_l1)
-
+                        sel_l1 = st.selectbox("L1", OBJECT_L1_OPTIONS, index=idx_l1, key=f"l1_{folder_name}")
+                        l2_opts = ["None"] + list(OBJECT_HIERARCHY[sel_l1].keys()) if sel_l1 != "None" else ["None"]
+                        idx_l2 = l2_opts.index(def_l2) if def_l2 in l2_opts else 0
+                        sel_l2 = st.selectbox("L2", l2_opts, index=idx_l2, key=f"l2_{folder_name}")
+                        final_obj = sel_l2 if sel_l2 != "None" else sel_l1
                     with cfg2:
-                        st.caption("🎭 Action & Emotion")
+                        st.caption("🎭 Action/Emotion")
                         idx_act = ACTION_OPTIONS.index(s_act) if s_act in ACTION_OPTIONS else 0
-                        sel_act = st.selectbox("Action", options=ACTION_OPTIONS, index=idx_act, key=f"act_{folder_name}")
-                        
+                        sel_act = st.selectbox("Action", ACTION_OPTIONS, index=idx_act, key=f"act_{folder_name}")
                         idx_emo = EMOTION_OPTIONS.index(s_emo) if s_emo in EMOTION_OPTIONS else 0
-                        sel_emo = st.selectbox("Emotion", options=EMOTION_OPTIONS, index=idx_emo, key=f"emo_{folder_name}")
-
+                        sel_emo = st.selectbox("Emotion", EMOTION_OPTIONS, index=idx_emo, key=f"emo_{folder_name}")
                     with cfg3:
                         st.caption("🎨 Styles")
                         idx_s1 = STYLES.index(s_s1) if s_s1 in STYLES else 0
-                        sel_s1 = st.selectbox("Style 1", options=STYLES, index=idx_s1, key=f"s1_{folder_name}")
+                        sel_s1 = st.selectbox("Style 1", STYLES, index=idx_s1, key=f"s1_{folder_name}")
+                        sel_s2 = st.selectbox("Style 2", STYLES, key=f"s2_{folder_name}")
                         
-                        s2_opts = [s for s in STYLES if s != sel_s1 or s == "None"]
-                        idx_s2 = s2_opts.index(s_s2) if s_s2 in s2_opts else 0
-                        sel_s2 = st.selectbox("Style 2", options=s2_opts, index=idx_s2, key=f"s2_{folder_name}")
-                        
-                    folder_configs[folder_name] = {
-                        "obj": final_obj,
-                        "act": sel_act if sel_act != "None" else "None",
-                        "emo": sel_emo if sel_emo != "None" else "None",
-                        "s1": str(sel_s1) if sel_s1 else "None",
-                        "s2": str(sel_s2) if sel_s2 else "None"
-                    }
-                
-    if not folders_to_process: st.error("No valid image files found.")
-elif root_dir:
-    st.error("Invalid path.")
+                    folder_configs[folder_name] = {"obj": final_obj, "act": sel_act, "emo": sel_emo, "s1": sel_s1, "s2": sel_s2}
 
 st.divider()
 
-st.subheader("2. Batch Export")
-st.info("The configuration set above will be applied to all natural-sorted files in their respective folders.")
-
 if folders_to_process:
-    total_files_to_process = sum(len(files) for files in folders_to_process.values())
-    
-    if st.button(f"🚀 Export Tags for {total_files_to_process} Files", type="primary", use_container_width=True):
-        
-        my_bar = st.progress(0, text="Assembling final data...")
+    if st.button(f"🚀 Export Tags for {sum(len(f) for f in folders_to_process.values())} Files", type="primary", use_container_width=True):
         results = []
-        current_file_idx = 0
-        
         for folder_name, file_paths in folders_to_process.items():
-            f_obj = folder_configs[folder_name]["obj"]
-            f_act = folder_configs[folder_name]["act"]
-            f_emo = folder_configs[folder_name]["emo"]
-            f_s1 = folder_configs[folder_name]["s1"]
-            f_s2 = folder_configs[folder_name]["s2"]
-            
-            folder_hashtag = folder_name.replace(" ", "")
-            
+            cfg = folder_configs[folder_name]
             for file_path in file_paths:
-                file_basename = os.path.basename(file_path)
-                auto_type = detect_media_type_local(file_path)
-                
-                tags = [folder_hashtag, f_obj, f_act, f_emo, auto_type, f_s1, f_s2]
-                valid_tags = [f"#{str(t).strip()}" for t in tags if t and str(t).strip() and str(t).strip() != "None"]
-                hashtag_str = " ".join(valid_tags)
-                
+                tags = [folder_name.replace(" ", ""), cfg["obj"], cfg["act"], cfg["emo"], detect_media_type_local(file_path), cfg["s1"], cfg["s2"]]
+                valid_tags = [f"#{t}" for t in tags if t and t != "None"]
                 results.append({
-                    "Folder Name": folder_name,
-                    "File Name": file_basename,
-                    "Object": f_obj if f_obj != "None" else "",
-                    "Action": f_act if f_act != "None" else "",
-                    "Emotion": f_emo if f_emo != "None" else "",
-                    "Type": auto_type,
-                    "Style1": f_s1 if f_s1 != "None" else "",
-                    "Style2": f_s2 if f_s2 != "None" else "",
-                    "Generated Hashtags": hashtag_str
+                    "Folder": folder_name, "File": os.path.basename(file_path), "Hashtags": " ".join(valid_tags)
                 })
-                current_file_idx += 1
-                my_bar.progress(current_file_idx / total_files_to_process, text=f"Processing {folder_name}...")
-                
-        my_bar.empty()
-        st.success(f"🎉 Successfully exported data for {total_files_to_process} files!")
-        
-        df_results = pd.DataFrame(results)
-        st.dataframe(df_results, use_container_width=True, hide_index=True)
-        
-        csv_data = convert_df_to_csv(df_results)
-        st.download_button(
-            label="📥 Download Results (CSV)",
-            data=csv_data,
-            file_name="ai_pro_hashtags.csv",
-            mime="text/csv",
-            type="primary"
-        )
+        df = pd.DataFrame(results)
+        st.dataframe(df, use_container_width=True)
+        st.download_button("📥 Download CSV", convert_df_to_csv(df), "hashtags.csv", "text/csv")
