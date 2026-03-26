@@ -8,24 +8,29 @@ import os
 import re
 import base64
 import json
-import uuid
-import zipfile
-import io
-import extra_streamlit_components as stx
 import firebase_admin
 from firebase_admin import credentials, firestore
+from streamlit_google_auth import Authenticate
 
 # ===== PAGE CONFIGURATION =====
 st.set_page_config(
-    page_title="AI Pro ZIP Batch Hashtag", 
+    page_title="AI Pro Batch Hashtag Generator", 
     page_icon="🔥", 
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# ===== 0. HỆ THỐNG BẢO MẬT (FIREBASE + COOKIE) =====
-cookie_manager = stx.CookieManager()
+# ===== 0. CẤU HÌNH GOOGLE AUTH =====
+# Lưu ý: Cần có file google_credentials.json tải từ Google Cloud Console
+# đặt cùng thư mục với file app.py này
+authenticator = Authenticate(
+    secret_credentials_path='google_credentials.json',
+    cookie_name='ai_pro_hashtag_cookie',
+    cookie_key='chuoi_ma_hoa_bi_mat_cua_cau', # Có thể đổi thành chuỗi ngẫu nhiên bất kỳ
+    redirect_uri='http://localhost:8501', # Đổi thành link web thật của cậu khi deploy
+)
 
+# ===== 1. KHỞI TẠO FIREBASE (Dùng để check Whitelist Email) =====
 @st.cache_resource
 def init_firebase():
     if not firebase_admin._apps:
@@ -33,65 +38,86 @@ def init_firebase():
             key_dict = json.loads(st.secrets["firebase_json"])
             cred = credentials.Certificate(key_dict)
             firebase_admin.initialize_app(cred)
-        except Exception:
-            st.error("⚠️ Lỗi cấu hình Firebase Secrets!")
+        except Exception as e:
+            st.error("⚠️ Lỗi cấu hình Firebase Secrets. Vui lòng kiểm tra lại file secrets.toml.")
             st.stop()
     return firestore.client()
 
 db = init_firebase()
 
-def check_license_key():
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
+# ===== 2. HỆ THỐNG KIỂM DUYỆT ĐĂNG NHẬP (GMAIL) =====
+def check_gmail_login():
+    # Kiểm tra trạng thái session từ cookie Google
+    authenticator.check_authentification()
 
-    if not st.session_state["authenticated"]:
+    if not st.session_state.get('connected'):
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.markdown("<h2 style='text-align: center;'>🔒 CỬU VÂN SƠN - BẢO MẬT</h2>", unsafe_allow_html=True)
-            client_cookie_id = cookie_manager.get(cookie="SIIN_DEVICE_ID")
-            if not client_cookie_id:
-                client_cookie_id = str(uuid.uuid4())
-                cookie_manager.set("SIIN_DEVICE_ID", client_cookie_id, max_age=31536000)
+            st.markdown("<h2 style='text-align: center;'>🔒 CỬU VÂN SƠN - HỆ THỐNG NỘI BỘ</h2>", unsafe_allow_html=True)
+            st.caption("Vui lòng đăng nhập bằng tài khoản Gmail đã được cấp quyền.")
             
-            st.info(f"💻 Mã trình duyệt: `{str(client_cookie_id)[:8]}-...`")
-            entered_key = st.text_input("🔑 Nhập License Key:", type="password")
+            # Render nút Login của Google
+            authenticator.login()
             
-            if st.button("🔓 Mở Khóa Hệ Thống", use_container_width=True, type="primary"):
-                key_ref = db.collection("keys").document(entered_key.strip())
-                key_doc = key_ref.get()
-                if key_doc.exists:
-                    key_data = key_doc.to_dict()
-                    saved_id = key_data.get("device_id", "")
-                    if saved_id == "" or saved_id == client_cookie_id:
-                        key_ref.update({"device_id": client_cookie_id})
-                        st.session_state["authenticated"] = True
-                        st.session_state["user_name"] = key_data.get("owner_name", "VIP")
-                        st.rerun()
-                    else: st.error("🚫 Key đã bị trói với thiết bị khác!")
-                else: st.error("❌ Key không tồn tại!")
-        st.stop()
+        st.stop() # Cắt luồng chạy nếu chưa đăng nhập thành công
+    
+    else:
+        # Lấy thông tin user sau khi Google trả về
+        user_info = st.session_state.get('user_info', {})
+        user_email = user_info.get('email')
+        user_name = user_info.get('name', 'Khách VIP')
+        
+        # --- BƯỚC KIỂM DUYỆT BẰNG FIREBASE ---
+        # Tìm trong collection "allowed_users" xem có email này không
+        user_ref = db.collection("allowed_users").document(user_email)
+        user_doc = user_ref.get()
+        
+        if not user_doc.exists:
+            st.error(f"❌ Tài khoản {user_email} chưa được cấp quyền truy cập hệ thống!")
+            # Render nút đăng xuất để user có thể thoát và thử mail khác
+            authenticator.logout()
+            st.stop()
+        else:
+            # Lấy data từ Firebase (có thể thêm tên, role, status chặn...)
+            user_data = user_doc.to_dict()
+            is_active = user_data.get("is_active", True) 
+            
+            if not is_active:
+                st.error(f"🚫 Tài khoản {user_email} đã bị tạm khóa bởi quản trị viên!")
+                authenticator.logout()
+                st.stop()
 
-check_license_key()
+            # Nếu hợp lệ qua hết các bài test
+            st.session_state["authenticated"] = True
+            st.session_state["user_name"] = user_name
+            st.session_state["user_email"] = user_email
 
-# ===== 1. CSS HACK: XANH HÓA TẤT CẢ ACTION BUTTONS =====
+check_gmail_login()
+
+# =========================================================================
+# TỪ ĐÂY TRỞ XUỐNG LÀ LÕI TOOL CHÍNH (Chỉ chạy khi Email hợp lệ)
+# =========================================================================
+
+user_name = st.session_state.get("user_name", "Khách")
+user_email = st.session_state.get("user_email", "")
+
 st.markdown("""
     <style>
-    div.stButton > button[kind="primary"], 
-    div.stDownloadButton > button {
+    div.stButton > button[kind="primary"] {
         background-color: #28a745 !important;
         color: white !important;
         border-color: #28a745 !important;
-        width: 100%;
     }
-    div.stButton > button[kind="primary"]:hover, 
-    div.stDownloadButton > button:hover {
+    div.stButton > button[kind="primary"]:hover {
         background-color: #218838 !important;
         border-color: #1e7e34 !important;
     }
     </style>
 """, unsafe_allow_html=True)
 
-# ===== 2. DATA HIERARCHY & UTILS =====
+TYPES = ['Gif', 'Image']
+STYLES = ['None', 'Meme', 'Funny', 'Cute', 'Hot', 'Slay', 'Lowkey', 'Highkey', 'Savage', '2D', '3D', 'Anime', 'Romance', 'Cool']
+
 OBJECT_HIERARCHY = {
     'Action': {'Communicate': ['Talk', 'Shakehead', 'Shakehand', 'Think', 'Shout', 'Tease', 'Sing', 'Refuse', 'Agree'],
                'Lifeaction': ['Eat', 'Sleep', 'Wakeup', 'Cook', 'Study', 'Work', 'Relax'],
@@ -124,7 +150,7 @@ OBJECT_HIERARCHY = {
     'Vehicle': {'Bike': [], 'Car': [], 'Skateboard': []}
 }
 
-STYLES = ['None', 'Meme', 'Funny', 'Cute', 'Hot', 'Slay', 'Lowkey', 'Highkey', 'Savage', '2D', '3D', 'Anime', 'Romance', 'Cool']
+VALID_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
 OBJECT_L1_OPTIONS = ["None"] + [k for k in OBJECT_HIERARCHY.keys() if k not in ['Action', 'Emotion']]
 
 def get_flat_options(root_key):
@@ -137,37 +163,17 @@ def get_flat_options(root_key):
 ACTION_OPTIONS = get_flat_options('Action')
 EMOTION_OPTIONS = get_flat_options('Emotion')
 
-# --- Helper Functions ---
-def natural_keys(text):
-    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
-
-def detect_type_from_bytes(img_bytes, file_name):
-    """Xác nhận định dạng Gif hay Image từ dữ liệu Bytes"""
-    ext = file_name.lower().split('.')[-1]
-    if ext == 'gif': return 'Gif'
-    try:
-        img = PILImage.open(io.BytesIO(img_bytes))
-        if getattr(img, "is_animated", False): return 'Gif'
-    except: pass
-    return 'Image'
-
-def render_base64_img(bytes_data, file_name):
-    b64 = base64.b64encode(bytes_data).decode("utf-8")
-    ext = file_name.split('.')[-1].lower()
-    mime = "image/webp" if ext == "webp" else ("image/gif" if ext == "gif" else f"image/{ext}")
-    st.markdown(f'<img src="data:{mime};base64,{b64}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
-
-# ===== 3. AI MODEL SETUP =====
 MODEL_ID = "openai/clip-vit-large-patch14"
 
-@st.cache_resource(show_spinner="Loading AI Model...")
+@st.cache_resource(show_spinner=f"Loading Heavy AI Model ({MODEL_ID}) into GPU... Please wait.")
 def load_clip_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
         processor = CLIPProcessor.from_pretrained(MODEL_ID)
         model = CLIPModel.from_pretrained(MODEL_ID).to(device)
         return processor, model, device
-    except Exception: return None, None, "cpu"
+    except Exception as e:
+        return None, None, "cpu"
 
 @st.cache_data
 def get_separated_vocabularies():
@@ -176,160 +182,282 @@ def get_separated_vocabularies():
         for l2_key, l3_list in OBJECT_HIERARCHY[l1].items():
             if not l3_list: obj_labels.append(l2_key)
             else: obj_labels.extend(l3_list)
+    if not obj_labels: obj_labels.append("Other")
     return sorted(list(set(obj_labels))), sorted([a for a in ACTION_OPTIONS if a != "None"]), sorted([e for e in EMOTION_OPTIONS if e != "None"])
 
-def run_classification(image, labels, processor, model, device):
-    inputs = processor(text=labels, images=image, return_tensors="pt", padding=True).to(device)
-    with torch.no_grad():
-        outputs = model(**inputs)
-        probs = outputs.logits_per_image.softmax(dim=1)
-    return labels[probs.argmax().item()]
+@st.cache_data
+def convert_df_to_csv(df):
+    return df.to_csv(index=False).encode('utf-8-sig')
+
+def natural_keys(text):
+    return [int(c) if c.isdigit() else c.lower() for c in re.split(r'(\d+)', text)]
+
+def detect_media_type_local(file_path):
+    ext = file_path.split('.')[-1].lower()
+    if ext == 'gif': return 'Gif'
+    try:
+        img = PILImage.open(file_path)
+        if getattr(img, "is_animated", False): return 'Gif'
+    except Exception: pass
+    return 'Image'
+
+def run_triple_classification(file_path, vocabs, processor, model, device):
+    try:
+        image = PILImage.open(file_path).convert("RGB")
+        def classify(labels):
+            if not labels: return "None"
+            inputs = processor(text=labels, images=image, return_tensors="pt", padding=True)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = model(**inputs)
+                probs = outputs.logits_per_image.softmax(dim=1)
+            return labels[probs.argmax().item()]
+        
+        best_obj = classify(vocabs['Object'])
+        best_act = classify(vocabs['Action'])
+        best_emo = classify(vocabs['Emotion'])
+        return best_obj, best_act, best_emo
+    except Exception:
+        return "None", "None", "None"
+
+def run_style_classification(file_path, styles_list, processor, model, device):
+    try:
+        valid_styles = [s for s in styles_list if s != "None"]
+        image = PILImage.open(file_path).convert("RGB")
+        inputs = processor(text=valid_styles, images=image, return_tensors="pt", padding=True)
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = model(**inputs)
+            probs = outputs.logits_per_image.softmax(dim=1)[0]
+        
+        top2_idx = torch.topk(probs, 2).indices.tolist()
+        return valid_styles[top2_idx[0]], valid_styles[top2_idx[1]]
+    except Exception:
+        return "None", "None"
 
 @st.cache_data
-def get_ai_prediction_from_bytes(img_bytes):
+def get_cached_ai_predictions(file_path):
     processor, model, device = st.session_state['ai_model']
-    img = PILImage.open(io.BytesIO(img_bytes)).convert("RGB")
-    v_obj, v_act, v_emo = get_separated_vocabularies()
+    if not processor: return "None", "None", "None", "Image", "None", "None"
     
-    s_obj = run_classification(img, v_obj, processor, model, device)
-    s_act = run_classification(img, v_act, processor, model, device)
-    s_emo = run_classification(img, v_emo, processor, model, device)
+    vocabs = {'Object': st.session_state['v_obj'], 'Action': st.session_state['v_act'], 'Emotion': st.session_state['v_emo']}
+    s_obj, s_act, s_emo = run_triple_classification(file_path, vocabs, processor, model, device)
+    s_type = detect_media_type_local(file_path)
+    s_style1, s_style2 = run_style_classification(file_path, STYLES, processor, model, device)
     
-    valid_styles = [s for s in STYLES if s != "None"]
-    inputs = processor(text=valid_styles, images=img, return_tensors="pt", padding=True).to(device)
-    with torch.no_grad():
-        probs = model(**inputs).logits_per_image.softmax(dim=1)[0]
-    top2 = torch.topk(probs, 2).indices.tolist()
-    return s_obj, s_act, s_emo, valid_styles[top2[0]], valid_styles[top2[1]]
+    return s_obj, s_act, s_emo, s_type, s_style1, s_style2
 
-def get_object_hierarchy_path(leaf):
-    if leaf in ["Other", "None"]: return "None", None, None
+def get_object_hierarchy_path(leaf_node):
+    if leaf_node == "Other" or leaf_node == "None": return "None", None, None
     for l1 in [k for k in OBJECT_L1_OPTIONS if k != "None"]:
         for l2, l3_list in OBJECT_HIERARCHY[l1].items():
-            if not l3_list and leaf == l2: return l1, l2, None
-            if leaf in l3_list: return l1, l2, leaf
+            if not l3_list and leaf_node == l2:
+                return l1, l2, None
+            if leaf_node in l3_list:
+                return l1, l2, leaf_node
     return "None", None, None
 
-# --- UI Dialog ---
-@st.dialog("🖼️ Xem toàn bộ thư mục")
-def show_preview_zip(zip_buffer, files_to_show):
-    st.markdown(f"**Hiển thị {len(files_to_show)} tệp trong thư mục**")
+@st.dialog("🖼️ Full Folder Preview")
+def show_folder_images_dialog(folder_name, file_paths):
+    st.markdown(f"**Viewing all {len(file_paths)} images in '{folder_name}'**")
     cols = st.columns(4)
-    with zipfile.ZipFile(zip_buffer) as z_dialog:
-        for i, f_path in enumerate(files_to_show):
-            with z_dialog.open(f_path) as f:
-                img_bytes_dialog = f.read()
-                with cols[i % 4]:
-                    st.caption(os.path.basename(f_path))
-                    render_base64_img(img_bytes_dialog, f_path)
+    for i, file_path in enumerate(file_paths):
+        try:
+            cols[i % 4].caption(os.path.basename(file_path))
+            with open(file_path, "rb") as img_file:
+                b64_str = base64.b64encode(img_file.read()).decode("utf-8")
+            ext = file_path.split('.')[-1].lower()
+            mime_type = "image/webp" if ext == "webp" else ("image/gif" if ext == "gif" else f"image/{ext}")
+            html_img = f'<img src="data:{mime_type};base64,{b64_str}" style="width:100%; border-radius:8px;" />'
+            cols[i % 4].markdown(html_img, unsafe_allow_html=True)
+        except Exception:
+            cols[i % 4].write("*(Format error)*")
 
-# ===== 4. MAIN UI =====
-st.title("🔥 AI Pro Multi-Folder ZIP Hashtag Generator")
-st.markdown(f"👤 **User:** `{st.session_state.get('user_name')}` | 🛠️ **Mode:** Batch ZIP (Web Optimized)")
+st.title("🔥 AI Pro Batch Hashtag Generator")
+st.markdown(f"**👤 Xin chào `{user_name}` ({user_email})** | Powered by `ViT-Large-Patch14` on **GPU**.")
 
 with st.sidebar:
-    if st.button("🔄 Refresh Page"): st.rerun()
-    if st.button("🚪 Logout"): 
-        st.session_state["authenticated"] = False
+    st.subheader("Bảng Điều Khiển")
+    if st.button("🔄 Làm Mới Hệ Thống", use_container_width=True):
         st.rerun()
-    proc, mod, dev = load_clip_model()
-    st.session_state['ai_model'] = (proc, mod, dev)
-    st.success(f"AI: **{dev.upper()}**")
+        
+    # Nút đăng xuất của thư viện Google Auth
+    authenticator.logout()
+        
+    st.divider()
+    st.subheader("System Status")
+    processor, model, device = load_clip_model()
+    if processor and model:
+        if device == "cuda":
+            st.success(f"🚀 AI Loaded on: **GPU (CUDA)**")
+        else:
+            st.warning(f"⚠️ AI Loaded on: **CPU** (Slow! Please install CUDA)")
+            
+        st.session_state['ai_model'] = (processor, model, device)
+        v_obj, v_act, v_emo = get_separated_vocabularies()
+        st.session_state['v_obj'] = v_obj
+        st.session_state['v_act'] = v_act
+        st.session_state['v_emo'] = v_emo
+    else:
+        st.error("AI Model failed to load.")
+        st.session_state['ai_model'] = (None, None, "cpu")
 
-zip_file = st.file_uploader("Upload file .ZIP chứa các Folder Sticker:", type=["zip"])
+st.subheader("1. AI Folder Configuration")
+root_dir = st.text_input("Parent Directory Path (e.g., D:\\My_Stickers):")
 
-if zip_file:
-    zip_bytes_io = io.BytesIO(zip_file.getvalue())
-    with zipfile.ZipFile(zip_bytes_io) as z:
-        valid_exts = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
-        all_files = sorted([m for m in z.namelist() if m.lower().endswith(valid_exts) and not m.startswith('__MACOSX')], key=natural_keys)
-        groups = {}
-        for f in all_files:
-            folder = os.path.dirname(f) or "Root"
-            if folder not in groups: groups[folder] = []
-            groups[folder].append(f)
-        st.success(f"📦 Tìm thấy {len(groups)} Folders và {len(all_files)} tệp.")
+folders_to_process = {}
+folder_configs = {}
 
-        folder_configs = {}
-        for f_name, f_files in groups.items():
-            with st.expander(f"📂 Thư mục: {f_name} ({len(f_files)} stickers)", expanded=False):
+if root_dir and os.path.isdir(root_dir):
+    subdirs = sorted([f.path for f in os.scandir(root_dir) if f.is_dir()], key=lambda x: natural_keys(os.path.basename(x)))
+    if not subdirs: subdirs = [root_dir] 
+        
+    st.success(f"Detected {len(subdirs)} folder(s). Generating AI predictions...")
+    
+    for folder_path in subdirs:
+        valid_files = [f for f in os.listdir(folder_path) if f.lower().endswith(VALID_EXTENSIONS)]
+        valid_files.sort(key=natural_keys) 
+        
+        if valid_files:
+            folder_name = os.path.basename(folder_path)
+            folders_to_process[folder_name] = [os.path.join(folder_path, f) for f in valid_files]
+            first_img_path = os.path.join(folder_path, valid_files[0])
+            
+            with st.container(border=True):
                 col_img, col_cfg = st.columns([1, 4])
-                with z.open(f_files[0]) as first:
-                    img_bytes = first.read()
-                    with col_img:
-                        render_base64_img(img_bytes, f_files[0])
-                        if st.button(f"👁️ View All", key=f"btn_{f_name}", use_container_width=True):
-                            show_preview_zip(zip_bytes_io, f_files)
+                
+                with col_img:
+                    try:
+                        with open(first_img_path, "rb") as f:
+                            b64_first = base64.b64encode(f.read()).decode("utf-8")
+                        first_ext = first_img_path.split('.')[-1].lower()
+                        first_mime = "image/webp" if first_ext == "webp" else ("image/gif" if first_ext == "gif" else f"image/{first_ext}")
+                        
+                        st.markdown(f'<img src="data:{first_mime};base64,{b64_first}" style="width:100%; border-radius:8px;"/>', unsafe_allow_html=True)
+                    except Exception as e:
+                        st.write("*(Preview error)*")
+                        
+                    if st.button(f"👁️ View All ({len(valid_files)})", key=f"btn_{folder_name}", use_container_width=True):
+                        show_folder_images_dialog(folder_name, folders_to_process[folder_name])
+                        
                 with col_cfg:
-                    s_obj, s_act, s_emo, s_s1, s_s2 = get_ai_prediction_from_bytes(img_bytes)
+                    st.markdown(f"**📂 Folder: {folder_name}**")
+                    
+                    s_obj, s_act, s_emo, s_type, s_s1, s_s2 = get_cached_ai_predictions(first_img_path)
                     def_l1, def_l2, def_l3 = get_object_hierarchy_path(s_obj)
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
+                    
+                    cfg1, cfg2, cfg3 = st.columns(3)
+                    
+                    with cfg1:
                         st.caption("🎯 Object Hierarchy")
                         idx_l1 = OBJECT_L1_OPTIONS.index(def_l1) if def_l1 in OBJECT_L1_OPTIONS else 0
-                        sel_l1 = st.selectbox("L1 Category", OBJECT_L1_OPTIONS, index=idx_l1, key=f"l1_{f_name}")
-                        l2_opts = ["None"] + list(OBJECT_HIERARCHY[sel_l1].keys()) if sel_l1 != "None" else ["None"]
-                        idx_l2 = l2_opts.index(def_l2) if (def_l2 in l2_opts) else 0
-                        sel_l2 = st.selectbox("L2 Subject", l2_opts, index=idx_l2, key=f"l2_{f_name}")
-                        l3_opts = ["None"] + OBJECT_HIERARCHY[sel_l1][sel_l2] if (sel_l1 != "None" and sel_l2 != "None") else ["None"]
-                        if len(l3_opts) > 1:
-                            idx_l3 = l3_opts.index(def_l3) if (def_l3 in l3_opts) else 0
-                            sel_l3 = st.selectbox("L3 Detail", l3_opts, index=idx_l3, key=f"l3_{f_name}")
-                        else: sel_l3 = "None"
-                        final_obj = sel_l3 if sel_l3 != "None" else (sel_l2 if sel_l2 != "None" else sel_l1)
-                    with c2:
+                        sel_l1 = st.selectbox("L1 (Category)", options=OBJECT_L1_OPTIONS, index=idx_l1, key=f"l1_{folder_name}")
+                        
+                        if sel_l1 and sel_l1 != "None":
+                            l2_opts = ["None"] + list(OBJECT_HIERARCHY[sel_l1].keys())
+                            idx_l2 = l2_opts.index(def_l2) if def_l2 in l2_opts else 0
+                            sel_l2 = st.selectbox("L2 (Subject)", options=l2_opts, index=idx_l2, key=f"l2_{folder_name}")
+                            
+                            if sel_l2 and sel_l2 != "None":
+                                l3_opts = ["None"] + OBJECT_HIERARCHY[sel_l1][sel_l2] if OBJECT_HIERARCHY[sel_l1][sel_l2] else []
+                                if len(l3_opts) > 1:
+                                    idx_l3 = l3_opts.index(def_l3) if def_l3 in l3_opts else 0
+                                    sel_l3 = st.selectbox("L3 (Detail)", options=l3_opts, index=idx_l3, key=f"l3_{folder_name}")
+                                else:
+                                    sel_l3 = None
+                            else:
+                                sel_l3 = None
+                        else:
+                            sel_l2 = "None"
+                            sel_l3 = None
+                            
+                        final_obj = sel_l3 if sel_l3 and sel_l3 != "None" else (sel_l2 if sel_l2 and sel_l2 != "None" else sel_l1)
+
+                    with cfg2:
                         st.caption("🎭 Action & Emotion")
                         idx_act = ACTION_OPTIONS.index(s_act) if s_act in ACTION_OPTIONS else 0
-                        sel_act = st.selectbox("Action", ACTION_OPTIONS, index=idx_act, key=f"act_{f_name}")
+                        sel_act = st.selectbox("Action", options=ACTION_OPTIONS, index=idx_act, key=f"act_{folder_name}")
+                        
                         idx_emo = EMOTION_OPTIONS.index(s_emo) if s_emo in EMOTION_OPTIONS else 0
-                        sel_emo = st.selectbox("Emotion", EMOTION_OPTIONS, index=idx_emo, key=f"emo_{f_name}")
-                    with c3:
+                        sel_emo = st.selectbox("Emotion", options=EMOTION_OPTIONS, index=idx_emo, key=f"emo_{folder_name}")
+
+                    with cfg3:
                         st.caption("🎨 Styles")
                         idx_s1 = STYLES.index(s_s1) if s_s1 in STYLES else 0
-                        sel_s1 = st.selectbox("Style 1", STYLES, index=idx_s1, key=f"s1_{f_name}")
+                        sel_s1 = st.selectbox("Style 1", options=STYLES, index=idx_s1, key=f"s1_{folder_name}")
+                        
                         s2_opts = [s for s in STYLES if s != sel_s1 or s == "None"]
                         idx_s2 = s2_opts.index(s_s2) if s_s2 in s2_opts else 0
-                        sel_s2 = st.selectbox("Style 2", s2_opts, index=idx_s2, key=f"s2_{f_name}")
-                    folder_configs[f_name] = {
-                        "obj": final_obj, "act": sel_act, "emo": sel_emo, 
-                        "s1": sel_s1, "s2": sel_s2, "files": f_files
+                        sel_s2 = st.selectbox("Style 2", options=s2_opts, index=idx_s2, key=f"s2_{folder_name}")
+                        
+                    folder_configs[folder_name] = {
+                        "obj": final_obj,
+                        "act": sel_act if sel_act != "None" else "None",
+                        "emo": sel_emo if sel_emo != "None" else "None",
+                        "s1": str(sel_s1) if sel_s1 else "None",
+                        "s2": str(sel_s2) if sel_s2 else "None"
                     }
+                
+    if not folders_to_process: st.error("No valid image files found.")
+elif root_dir:
+    st.error("Invalid path.")
 
-        st.divider()
-        if st.button("🚀 Export All Folders to CSV", type="primary", use_container_width=True):
-            results = []
-            # Mở lại zip để kiểm tra định dạng từng tệp khi xuất
-            with zipfile.ZipFile(zip_bytes_io) as z_final:
-                for f_name, cfg in folder_configs.items():
-                    folder_hashtag = f_name.split('/')[-1].replace(" ", "")
-                    for file_path in cfg["files"]:
-                        with z_final.open(file_path) as current_f:
-                            file_bytes = current_f.read()
-                            
-                        fname = os.path.basename(file_path)
-                        # ĐỊNH DẠNG ĐÃ TRỞ LẠI:
-                        m_type = detect_type_from_bytes(file_bytes, fname)
-                        
-                        tags = [folder_hashtag, cfg["obj"], cfg["act"], cfg["emo"], m_type, cfg["s1"], cfg["s2"]]
-                        hashtag_str = " ".join([f"#{t}" for t in tags if t and t != "None"])
-                        
-                        results.append({
-                            "Folder": f_name, 
-                            "File Name": fname, 
-                            "Object": cfg["obj"] if cfg["obj"] != "None" else "",
-                            "Action": cfg["act"] if cfg["act"] != "None" else "",
-                            "Emotion": cfg["emo"] if cfg["emo"] != "None" else "",
-                            "Type": m_type,
-                            "Style1": cfg["s1"] if cfg["s1"] != "None" else "",
-                            "Style2": cfg["s2"] if cfg["s2"] != "None" else "",
-                            "Hashtags": hashtag_str
-                        })
+st.divider()
+
+st.subheader("2. Batch Export")
+st.info("The configuration set above will be applied to all natural-sorted files in their respective folders.")
+
+if folders_to_process:
+    total_files_to_process = sum(len(files) for files in folders_to_process.values())
+    
+    if st.button(f"🚀 Export Tags for {total_files_to_process} Files", type="primary", use_container_width=True):
+        
+        my_bar = st.progress(0, text="Assembling final data...")
+        results = []
+        current_file_idx = 0
+        
+        for folder_name, file_paths in folders_to_process.items():
+            f_obj = folder_configs[folder_name]["obj"]
+            f_act = folder_configs[folder_name]["act"]
+            f_emo = folder_configs[folder_name]["emo"]
+            f_s1 = folder_configs[folder_name]["s1"]
+            f_s2 = folder_configs[folder_name]["s2"]
             
-            df = pd.DataFrame(results)
-            st.dataframe(df, use_container_width=True)
-            st.download_button(
-                label="📥 Download Final CSV",
-                data=df.to_csv(index=False).encode('utf-8-sig'),
-                file_name="hashtags_batch_full.csv",
-                mime="text/csv"
-            )
+            folder_hashtag = folder_name.replace(" ", "")
+            
+            for file_path in file_paths:
+                file_basename = os.path.basename(file_path)
+                auto_type = detect_media_type_local(file_path)
+                
+                tags = [folder_hashtag, f_obj, f_act, f_emo, auto_type, f_s1, f_s2]
+                valid_tags = [f"#{str(t).strip()}" for t in tags if t and str(t).strip() and str(t).strip() != "None"]
+                hashtag_str = " ".join(valid_tags)
+                
+                results.append({
+                    "Folder Name": folder_name,
+                    "File Name": file_basename,
+                    "Object": f_obj if f_obj != "None" else "",
+                    "Action": f_act if f_act != "None" else "",
+                    "Emotion": f_emo if f_emo != "None" else "",
+                    "Type": auto_type,
+                    "Style1": f_s1 if f_s1 != "None" else "",
+                    "Style2": f_s2 if f_s2 != "None" else "",
+                    "Generated Hashtags": hashtag_str
+                })
+                current_file_idx += 1
+                my_bar.progress(current_file_idx / total_files_to_process, text=f"Processing {folder_name}...")
+                
+        my_bar.empty()
+        st.success(f"🎉 Successfully exported data for {total_files_to_process} files!")
+        
+        df_results = pd.DataFrame(results)
+        st.dataframe(df_results, use_container_width=True, hide_index=True)
+        
+        csv_data = convert_df_to_csv(df_results)
+        st.download_button(
+            label="📥 Download Results (CSV)",
+            data=csv_data,
+            file_name="ai_pro_hashtags.csv",
+            mime="text/csv",
+            type="primary"
+        )
