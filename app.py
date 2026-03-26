@@ -7,10 +7,6 @@ import torch
 import os
 import re
 import base64
-import json
-import firebase_admin
-from firebase_admin import credentials, firestore
-from streamlit_google_auth import Authenticate
 
 # ===== PAGE CONFIGURATION =====
 st.set_page_config(
@@ -20,99 +16,56 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ===== TẠO FILE GOOGLE AUTH ẢO TỪ SECRETS =====
-if not os.path.exists("google_credentials.json"):
-    try:
-        # Lấy nội dung từ Streamlit Secrets
-        google_creds = json.loads(st.secrets["google_auth_json"])
-        # Ghi ra một file ảo trên server
-        with open("google_credentials.json", "w") as f:
-            json.dump(google_creds, f)
-    except Exception as e:
-        st.error("⚠️ Chưa cấu hình biến 'google_auth_json' trong Streamlit Secrets!")
-        st.stop()
+# ===== 1. HỆ THỐNG ĐĂNG NHẬP NỘI BỘ =====
+def check_password():
+    """Returns `True` if the user had the correct password."""
 
-# ===== 0. CẤU HÌNH GOOGLE AUTH =====
-authenticator = Authenticate(
-    secret_credentials_path='google_credentials.json',
-    cookie_name='ai_pro_hashtag_cookie',
-    cookie_key='chuoi_ma_hoa_bi_mat_cua_cau',
-    # QUAN TRỌNG: Sửa link dưới đây thành link app Streamlit thật của cậu
-    redirect_uri='https://hashtagstickki008.streamlit.app', 
-)
+    def password_entered():
+        """Checks whether a password entered by the user is correct."""
+        if (
+            st.session_state["username"] in st.secrets["passwords"]
+            and st.session_state["password"]
+            == st.secrets["passwords"][st.session_state["username"]]
+        ):
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  # Xóa pass khỏi session cho an toàn
+        else:
+            st.session_state["password_correct"] = False
 
-# ... (Giữ nguyên phần code Firebase và phần Lõi ở dưới) ...
-
-# ===== 1. KHỞI TẠO FIREBASE (Dùng để check Whitelist Email) =====
-@st.cache_resource
-def init_firebase():
-    if not firebase_admin._apps:
-        try:
-            key_dict = json.loads(st.secrets["firebase_json"])
-            cred = credentials.Certificate(key_dict)
-            firebase_admin.initialize_app(cred)
-        except Exception as e:
-            st.error("⚠️ Lỗi cấu hình Firebase Secrets. Vui lòng kiểm tra lại file secrets.toml.")
-            st.stop()
-    return firestore.client()
-
-db = init_firebase()
-
-# ===== 2. HỆ THỐNG KIỂM DUYỆT ĐĂNG NHẬP (GMAIL) =====
-def check_gmail_login():
-    # Kiểm tra trạng thái session từ cookie Google
-    authenticator.check_authentification()
-
-    if not st.session_state.get('connected'):
+    if "password_correct" not in st.session_state:
+        # Lần đầu chạy, hiển thị form đăng nhập
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
             st.markdown("<h2 style='text-align: center;'>🔒 CỬU VÂN SƠN - HỆ THỐNG NỘI BỘ</h2>", unsafe_allow_html=True)
-            st.caption("Vui lòng đăng nhập bằng tài khoản Gmail đã được cấp quyền.")
-            
-            # Render nút Login của Google
-            authenticator.login()
-            
-        st.stop() # Cắt luồng chạy nếu chưa đăng nhập thành công
-    
+            st.text_input("👤 Tài khoản", key="username")
+            st.text_input("🔑 Mật khẩu", type="password", key="password")
+            st.button("Đăng nhập", on_click=password_entered, type="primary", use_container_width=True)
+        return False
+        
+    elif not st.session_state["password_correct"]:
+        # Nhập sai mật khẩu
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown("<h2 style='text-align: center;'>🔒 CỬU VÂN SƠN - HỆ THỐNG NỘI BỘ</h2>", unsafe_allow_html=True)
+            st.text_input("👤 Tài khoản", key="username")
+            st.text_input("🔑 Mật khẩu", type="password", key="password")
+            st.button("Đăng nhập", on_click=password_entered, type="primary", use_container_width=True)
+            st.error("❌ Tài khoản hoặc mật khẩu không chính xác!")
+        return False
+        
     else:
-        # Lấy thông tin user sau khi Google trả về
-        user_info = st.session_state.get('user_info', {})
-        user_email = user_info.get('email')
-        user_name = user_info.get('name', 'Khách VIP')
-        
-        # --- BƯỚC KIỂM DUYỆT BẰNG FIREBASE ---
-        # Tìm trong collection "allowed_users" xem có email này không
-        user_ref = db.collection("allowed_users").document(user_email)
-        user_doc = user_ref.get()
-        
-        if not user_doc.exists:
-            st.error(f"❌ Tài khoản {user_email} chưa được cấp quyền truy cập hệ thống!")
-            # Render nút đăng xuất để user có thể thoát và thử mail khác
-            authenticator.logout()
-            st.stop()
-        else:
-            # Lấy data từ Firebase (có thể thêm tên, role, status chặn...)
-            user_data = user_doc.to_dict()
-            is_active = user_data.get("is_active", True) 
-            
-            if not is_active:
-                st.error(f"🚫 Tài khoản {user_email} đã bị tạm khóa bởi quản trị viên!")
-                authenticator.logout()
-                st.stop()
+        # Nhập đúng, cho phép đi tiếp
+        return True
 
-            # Nếu hợp lệ qua hết các bài test
-            st.session_state["authenticated"] = True
-            st.session_state["user_name"] = user_name
-            st.session_state["user_email"] = user_email
-
-check_gmail_login()
+# KIỂM TRA ĐĂNG NHẬP NGAY TẠI ĐÂY
+if not check_password():
+    st.stop()  # Cắt luồng chạy nếu chưa login
 
 # =========================================================================
-# TỪ ĐÂY TRỞ XUỐNG LÀ LÕI TOOL CHÍNH (Chỉ chạy khi Email hợp lệ)
+# 2. TỪ ĐÂY TRỞ XUỐNG LÀ LÕI TOOL CHÍNH (Chỉ chạy khi đã login)
 # =========================================================================
 
-user_name = st.session_state.get("user_name", "Khách")
-user_email = st.session_state.get("user_email", "")
+user_name = st.session_state.get("username", "Admin")
 
 st.markdown("""
     <style>
@@ -178,7 +131,7 @@ EMOTION_OPTIONS = get_flat_options('Emotion')
 
 MODEL_ID = "openai/clip-vit-large-patch14"
 
-@st.cache_resource(show_spinner=f"Loading Heavy AI Model ({MODEL_ID}) into GPU... Please wait.")
+@st.cache_resource(show_spinner=f"Loading Heavy AI Model ({MODEL_ID}) into GPU/CPU... Please wait.")
 def load_clip_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     try:
@@ -287,15 +240,16 @@ def show_folder_images_dialog(folder_name, file_paths):
             cols[i % 4].write("*(Format error)*")
 
 st.title("🔥 AI Pro Batch Hashtag Generator")
-st.markdown(f"**👤 Xin chào `{user_name}` ({user_email})** | Powered by `ViT-Large-Patch14` on **GPU**.")
+st.markdown(f"**👤 Đang sử dụng bởi: `{user_name}`** | Powered by `ViT-Large-Patch14`.")
 
 with st.sidebar:
     st.subheader("Bảng Điều Khiển")
     if st.button("🔄 Làm Mới Hệ Thống", use_container_width=True):
         st.rerun()
         
-    # Nút đăng xuất của thư viện Google Auth
-    authenticator.logout()
+    if st.button("🚪 Đăng xuất", use_container_width=True):
+        st.session_state["password_correct"] = False
+        st.rerun()
         
     st.divider()
     st.subheader("System Status")
@@ -304,7 +258,7 @@ with st.sidebar:
         if device == "cuda":
             st.success(f"🚀 AI Loaded on: **GPU (CUDA)**")
         else:
-            st.warning(f"⚠️ AI Loaded on: **CPU** (Slow! Please install CUDA)")
+            st.warning(f"⚠️ AI Loaded on: **CPU**")
             
         st.session_state['ai_model'] = (processor, model, device)
         v_obj, v_act, v_emo = get_separated_vocabularies()
