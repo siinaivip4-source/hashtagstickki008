@@ -3,5 +3,6 @@ pandas
 Pillow
 transformers
 torch
-extra-streamlit-components
+torchvision
 firebase-admin
+streamlit-google-auth
