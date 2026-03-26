@@ -22,7 +22,6 @@ st.set_page_config(
 )
 
 # ===== 0. HỆ THỐNG BẢO MẬT (FIREBASE + COOKIE) =====
-@st.cache_resource(experimental_allow_widgets=True)
 def get_cookie_manager():
     return stx.CookieManager()
 
