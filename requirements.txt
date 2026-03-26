@@ -4,5 +4,3 @@ Pillow
 transformers==4.38.2
 torch
 torchvision
-firebase-admin
-streamlit-google-auth
