@@ -20,15 +20,28 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# ===== TẠO FILE GOOGLE AUTH ẢO TỪ SECRETS =====
+if not os.path.exists("google_credentials.json"):
+    try:
+        # Lấy nội dung từ Streamlit Secrets
+        google_creds = json.loads(st.secrets["google_auth_json"])
+        # Ghi ra một file ảo trên server
+        with open("google_credentials.json", "w") as f:
+            json.dump(google_creds, f)
+    except Exception as e:
+        st.error("⚠️ Chưa cấu hình biến 'google_auth_json' trong Streamlit Secrets!")
+        st.stop()
+
 # ===== 0. CẤU HÌNH GOOGLE AUTH =====
-# Lưu ý: Cần có file google_credentials.json tải từ Google Cloud Console
-# đặt cùng thư mục với file app.py này
 authenticator = Authenticate(
     secret_credentials_path='google_credentials.json',
     cookie_name='ai_pro_hashtag_cookie',
-    cookie_key='chuoi_ma_hoa_bi_mat_cua_cau', # Có thể đổi thành chuỗi ngẫu nhiên bất kỳ
-    redirect_uri='http://localhost:8501', # Đổi thành link web thật của cậu khi deploy
+    cookie_key='chuoi_ma_hoa_bi_mat_cua_cau',
+    # QUAN TRỌNG: Sửa link dưới đây thành link app Streamlit thật của cậu
+    redirect_uri='https://ten-app-cua-cau.streamlit.app', 
 )
+
+# ... (Giữ nguyên phần code Firebase và phần Lõi ở dưới) ...
 
 # ===== 1. KHỞI TẠO FIREBASE (Dùng để check Whitelist Email) =====
 @st.cache_resource
